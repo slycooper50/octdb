@@ -23,6 +23,7 @@ var vvertical: bool
 var allleft: bool 
 var out_msg: list<string>
 var rec_msg: bool
+var brk_cnt: number
 
 def Highlight(init: bool, old: string, new: string)
   var default = init ? 'default ' : ''
@@ -46,18 +47,31 @@ def InitVars()
 	brkpts = {}
 	brkpts_sgns = []
 	rec_msg = false
+	brk_cnt = 0
 
 enddef
 
 def OutCB(chan: channel, message: string)
 	out_msg = split(message, "\r")
-	var brkln = []
+	var brkln = 0
+	var entries = {}
+	var fname = expand("%")
 	for msg in out_msg 
 		if msg =~ 'brk'
-			brkln = split(msg, '=')
-			echom $"Breakpoint line number: {brkln[1]}"
-			brkpts[expand("%:p")] += str2nr(brkln[1])
+			brkln = str2nr(split(msg, '=')[1])
+			brk_cnt += 1
+			var label = slice(printf('%02X', brk_cnt), 0, 2)
+			echom $"Breakpoint line number: {brkln}"
+			if has_key(brkpts, fname)
+				if index(brkpts[fname], brkln) == -1 
+					brkpts[fname] = add(brkpts[fname], brkln)
+				endif
+			else
+				brkpts[fname] = [brkln]
+			endif
 			echom brkpts
+			sign_define($'dbgbrk{brkln}', {text: label, texthl: "debugBreakpoint"})
+			sign_place(0, 'Breakpoint', $'dbgbrk{brkln}', $'{expand("%")}', {lnum: brkln})
 		endif
 	endfor	
 	#var msg_type = out_msg[0]
@@ -136,8 +150,7 @@ def StartOctDb(bang: bool, ...octfile: list<string>)
 
 	#################################
 	#### Create Output PTY ####
-	outbfnr = term_start('NONE', {term_name: "Octave Debugging", vertical: vvertical,
-																out_cb: 'OutCB'})
+	outbfnr = term_start('NONE', {term_name: "Octave Debugging", vertical: vvertical, out_cb: 'OutCB'})
 	var outpty = job_info(term_getjob(outbfnr))['tty_out']
 	out_win = win_getid()
   if vvertical
