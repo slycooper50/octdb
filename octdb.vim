@@ -150,7 +150,7 @@ def StartOctDb(bang: bool, ...octfile: list<string>)
 
 	#################################
 	#### Create Output PTY ####
-	outbfnr = term_start('NONE', {term_name: "Octave Debugging", vertical: vvertical, out_cb: 'OutCB'})
+	outbfnr = term_start('NONE', {term_name: "Octave Output", vertical: vvertical, out_cb: 'OutCB'})
 	var outpty = job_info(term_getjob(outbfnr))['tty_out']
 	out_win = win_getid()
   if vvertical
@@ -166,7 +166,7 @@ def StartOctDb(bang: bool, ...octfile: list<string>)
 
 	#################################
 	#### Creat Octave Terminal ####
-	octbfnr = term_start(oct_bin, {term_name: "Octave", term_finish: 'close'})
+	octbfnr = term_start(oct_bin, {term_name: "Octave", term_finish: 'close', err_io: 'file', err_name: outpty})
 	oct_win = win_getid()
 	term_sendkeys(octbfnr, $"PAGER('cat > {outpty}'); page_output_immediately(1);page_screen_output(1)\r")
 	#################################
@@ -177,7 +177,6 @@ def StartOctDb(bang: bool, ...octfile: list<string>)
   win_gotoid(srcwin)
   InstallCommands()
 
-					
 enddef
 
 
