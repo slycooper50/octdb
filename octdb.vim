@@ -24,6 +24,10 @@ var allleft: bool
 var out_msg: list<string>
 var rec_msg: bool
 var brk_cnt: number
+var pcln: number
+var pcid: number
+var stack: list<any>
+var fname: string
 
 def Highlight(init: bool, old: string, new: string)
   var default = init ? 'default ' : ''
@@ -48,36 +52,66 @@ def InitVars()
 	brkpts_sgns = []
 	rec_msg = false
 	brk_cnt = 0
+	pcln = 0
+	pcid = 14
+	stack = []
+	fname = ''
 
 enddef
 
 def OutCB(chan: channel, message: string)
 	out_msg = split(message, "\r")
 	var brkln = 0
-	var entries = {}
-	var fname = expand("%")
-	for msg in out_msg 
-		if msg =~ 'brk'
-			brkln = str2nr(split(msg, '=')[1])
-			brk_cnt += 1
-			var label = slice(printf('%02X', brk_cnt), 0, 2)
-			echom $"Breakpoint line number: {brkln}"
-			if has_key(brkpts, fname)
-				if index(brkpts[fname], brkln) == -1 
-					brkpts[fname] = add(brkpts[fname], brkln)
-				endif
-			else
-				brkpts[fname] = [brkln]
+	if out_msg[0] =~ 'brk'
+		fname = trim(matchstr(out_msg[1], '=\s*\zs.*'))
+		brkln = str2nr(split(out_msg[0], '=')[1])
+		brk_cnt += 1
+		var label = slice(printf('%02X', brk_cnt), 0, 2)
+		if has_key(brkpts, fname)
+			if index(brkpts[fname], brkln) == -1 
+				brkpts[fname] = add(brkpts[fname], brkln)
 			endif
-			echom brkpts
-			sign_define($'dbgbrk{brkln}', {text: label, texthl: "debugBreakpoint"})
-			sign_place(0, 'Breakpoint', $'dbgbrk{brkln}', $'{expand("%")}', {lnum: brkln})
+		else
+			brkpts[fname] = [brkln]
 		endif
-	endfor	
-	#var msg_type = out_msg[0]
-	#echom msg_type
-	#if msg_type =~ 'brk'
-	#endif
+		if win_gotoid(srcwin)
+			if expand('%:p') != fnamemodify(fname, ':p')
+				exe $'edit {fname}'
+			endif
+			exe $":{brkln}"
+			sign_define($'dbgbrk{brkln}', {text: label, texthl: "debugBreakpoint"})
+			sign_place(0, 'Breakpoint', $'dbgbrk{brkln}', fname, {lnum: brkln})
+		endif
+	elseif out_msg[0] =~ 'stopped\s\+in\s*:'
+		stack = []
+		for frameln in out_msg[1 : ]
+			var frame = substitute(frameln, '[[:cntrl:]]', '', 'g')
+			var func = matchstr(frame, '\s*\zs.*\zeat')
+			var active = 0
+			if func =~ '-->'
+				func = substitute(func, '-->', '', '')
+				active = 1	
+			endif
+			var ln = matchstr(frame, 'line\s*\zs\d*\s*\ze[')
+			fname = matchstr(frame, '[\zs.*\ze\]')
+			var entry = {'func': func, 'ln': ln, 'fname': fname, 'acitve': active}
+			if !empty(func)
+				add(stack, entry)
+			endif
+		endfor
+		echom stack
+	elseif out_msg[0] =~ 'stopped\s\+in'
+		fname = matchstr(out_msg[0], '[\zs.*\ze\]')
+		pcln = str2nr(matchstr(out_msg[0], "line\\zs\\s*\\d*"))
+		if win_gotoid(srcwin)
+			if expand('%:p') != fnamemodify(fname, ':p')
+				exe $'edit {trim(fname)}'
+			endif
+			exe $":{pcln}"
+			sign_unplace('TermDebug', {id: pcid})
+			sign_place(pcid, 'TermDebug', 'debugPC', '%', {lnum: pcln})
+		endif
+	endif
 enddef
 
 def InitAutocmd()
@@ -105,7 +139,7 @@ def SetBreakpoint(at: string)
 
   # Use the fname:lnum format, older gdb can't handle --source.
 	var AT = empty(at) ? $"{QuoteArg(expand('<cword>'))}, {QuoteArg($"{line('.')}")}" : at
-	var cmd = $"brk = dbstop ({AT})\r"
+	var cmd = $"brk = dbstop ({AT}), file =file_in_loadpath({QuoteArg(expand('<cword>') .. '.m')})\r"
 	term_sendkeys(octbfnr, cmd)
 	#win_gotoid(oct_win)
   #if do_continue
@@ -114,7 +148,7 @@ def SetBreakpoint(at: string)
 enddef
 
 def InstallCommands()
-  command -nargs=? Break  SetBreakpoint(<q-args>)
+  command! -nargs=? Break  SetBreakpoint(<q-args>)
   #command Clear  ClearBreakpoint()
   #command Step  SendResumingCommand('-exec-step')
   #command Over  SendResumingCommand('-exec-next')
@@ -135,6 +169,15 @@ def InstallCommands()
   #command Winbar  InstallWinbar(true)
 enddef
 
+def Mapping()
+	nnoremap <expr> <F9> $':call term_sendkeys({octbfnr}, "dbcont\r")<CR>'
+	nnoremap <expr> <F8> $':call term_sendkeys({octbfnr}, "dbnext\r")<CR>'
+	nnoremap <expr> <F6> $':call term_sendkeys({octbfnr}, "dbstep out\r")<CR>'
+	nnoremap <expr> <F5> $':call term_sendkeys({octbfnr}, "dbstep in\r")<CR>'
+	nnoremap <expr> <C-L> $':call term_sendkeys({octbfnr},' .. "'printf(" .. '"\033c")' .. "'" .. '.. "\r")<CR>'
+	nnoremap <expr> ,<Space> $':call term_sendkeys({octbfnr},' .. "'printf(" .. '"\033c");dbwhere' .. "'" .. '.. "\r")<CR>'
+enddef
+
 ###################################################################################
 # Main function #
 # This is a big function break it down later.
@@ -150,7 +193,7 @@ def StartOctDb(bang: bool, ...octfile: list<string>)
 
 	#################################
 	#### Create Output PTY ####
-	outbfnr = term_start('NONE', {term_name: "Octave Output", vertical: vvertical, out_cb: 'OutCB'})
+	outbfnr = term_start('NONE', {term_name: "Octave Output", vertical: vvertical, callback: 'OutCB'})
 	var outpty = job_info(term_getjob(outbfnr))['tty_out']
 	out_win = win_getid()
   if vvertical
@@ -176,6 +219,7 @@ def StartOctDb(bang: bool, ...octfile: list<string>)
   # Install debugger commands in the text window.
   win_gotoid(srcwin)
   InstallCommands()
+	Mapping()
 
 enddef
 
