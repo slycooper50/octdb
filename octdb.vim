@@ -11,8 +11,10 @@ enddef
 command -nargs=* -complete=file -bang OctDb StartOctDb(<bang>0, <f-args>)
 var octproc_id: number
 var octbfnr: number
+var commbfnr: number
 var outbfnr: number
 var oct_win: number
+var comm_win: number
 var out_win: number
 var srcwin: number
 var brkpts: dict<any>
@@ -28,6 +30,7 @@ var pcln: number
 var pcid: number
 var stack: list<any>
 var fname: string
+var brk_sgns: list<string>
 
 def Highlight(init: bool, old: string, new: string)
   var default = init ? 'default ' : ''
@@ -42,6 +45,8 @@ def InitHighlight()
   Highlight(true, '', &background)
   hi default debugBreakpoint term=reverse ctermbg=red guibg=red
   hi default debugBreakpointDisabled term=reverse ctermbg=gray guibg=gray
+	hi default frame cterm=bold ctermfg=12 guifg=DodgerBlue
+	hi default link curr_frame WarningMsg
 enddef
 
 def InitVars()
@@ -59,7 +64,7 @@ def InitVars()
 
 enddef
 
-def OutCB(chan: channel, message: string)
+def CommCB(chan: channel, message: string)
 	out_msg = split(message, "\r")
 	var brkln = 0
 	if out_msg[0] =~ 'brk'
@@ -83,23 +88,7 @@ def OutCB(chan: channel, message: string)
 			sign_place(0, 'Breakpoint', $'dbgbrk{brkln}', fname, {lnum: brkln})
 		endif
 	elseif out_msg[0] =~ 'stopped\s\+in\s*:'
-		stack = []
-		for frameln in out_msg[1 : ]
-			var frame = substitute(frameln, '[[:cntrl:]]', '', 'g')
-			var func = matchstr(frame, '\s*\zs.*\zeat')
-			var active = 0
-			if func =~ '-->'
-				func = substitute(func, '-->', '', '')
-				active = 1	
-			endif
-			var ln = matchstr(frame, 'line\s*\zs\d*\s*\ze[')
-			fname = matchstr(frame, '[\zs.*\ze\]')
-			var entry = {'func': func, 'ln': ln, 'fname': fname, 'acitve': active}
-			if !empty(func)
-				add(stack, entry)
-			endif
-		endfor
-		echom stack
+		HandleStack(out_msg[1 : ])
 	elseif out_msg[0] =~ 'stopped\s\+in'
 		fname = matchstr(out_msg[0], '[\zs.*\ze\]')
 		pcln = str2nr(matchstr(out_msg[0], "line\\zs\\s*\\d*"))
@@ -110,6 +99,9 @@ def OutCB(chan: channel, message: string)
 			exe $":{pcln}"
 			sign_unplace('TermDebug', {id: pcid})
 			sign_place(pcid, 'TermDebug', 'debugPC', '%', {lnum: pcln})
+		endif
+		if out_msg[1] =~ 'stopped\s\+in\s*:'
+			HandleStack(out_msg[3 : ])
 		endif
 	endif
 enddef
@@ -128,23 +120,51 @@ def QuoteArg(x: string): string
 enddef
 
 def SetBreakpoint(at: string)
-  # Setting a breakpoint may not work while the program is running.
-  # Interrupt to make it work.
-  #var do_continue = false
-  #if !stopped
-  #  do_continue = true
-  #  StopCommand()
-  #  sleep 10m
-  #endif
-
-  # Use the fname:lnum format, older gdb can't handle --source.
 	var AT = empty(at) ? $"{QuoteArg(expand('<cword>'))}, {QuoteArg($"{line('.')}")}" : at
 	var cmd = $"brk = dbstop ({AT}), file =file_in_loadpath({QuoteArg(expand('<cword>') .. '.m')})\r"
 	term_sendkeys(octbfnr, cmd)
-	#win_gotoid(oct_win)
-  #if do_continue
-  #  ContinueCommand()
-  #endif
+enddef
+
+def HandleStack(frames: list<string>)
+	stack = []
+	var lines = []
+	for frameln in frames
+		var frame = substitute(frameln, '[[:cntrl:]]', '', 'g')
+		var func = matchstr(frame, '\s*\zs.*\ze\s\+at')
+		var active = 0
+		if func =~ '-->'
+			func = trim(substitute(func, '-->', '', ''), '', 0)
+			active = 1	
+		endif
+		var ln = matchstr(frame, 'line\s*\zs\d*\s*\ze[')
+		fname = matchstr(frame, '[\zs.*\ze\]')
+		var entry = {'func': func, 'ln': ln, 'fname': fname, 'active': active}
+		if !empty(func)
+			add(stack, entry)
+		endif
+	endfor
+	echom stack
+	for frame in stack
+		add(lines, frame['func'])
+		if frame['active']
+			matchadd('curr_frame', frame['func'], 10, -1, {window: out_win})
+		else
+			matchadd('frame', frame['func'], 10, -1, {window: out_win})
+		endif
+	endfor
+	setbufline(outbfnr, 1, lines)
+enddef
+
+def Up(count: number)
+	var cmd = $"dbup {count}\r"
+	term_sendkeys(octbfnr, cmd)
+	term_sendkeys(octbfnr, "dbstack\r")
+enddef
+
+def Down(count: number)
+	var cmd = $"dbdown {count}\r"
+	term_sendkeys(octbfnr, cmd)
+	term_sendkeys(octbfnr, "dbstack\r")
 enddef
 
 def InstallCommands()
@@ -159,8 +179,8 @@ def InstallCommands()
   #command Stop StopCommand()
   #command Continue ContinueCommand()
   #command -nargs=* Frame  Frame(<q-args>)
-  #command -count=1 Up  Up(<count>)
-  #command -count=1 Down  Down(<count>)
+  command! -count=1 Up  Up(<count>)
+  command! -count=1 Down  Down(<count>)
   #command -range -nargs=* Evaluate  Evaluate(<range>, <q-args>)
   #command Gdb  win_gotoid(gdbwin)
   #command Program  GotoProgram()
@@ -175,12 +195,19 @@ def Mapping()
 	nnoremap <expr> <F6> $':call term_sendkeys({octbfnr}, "dbstep out\r")<CR>'
 	nnoremap <expr> <F5> $':call term_sendkeys({octbfnr}, "dbstep in\r")<CR>'
 	nnoremap <expr> <C-L> $':call term_sendkeys({octbfnr},' .. "'printf(" .. '"\033c")' .. "'" .. '.. "\r")<CR>'
-	nnoremap <expr> ,<Space> $':call term_sendkeys({octbfnr},' .. "'printf(" .. '"\033c");dbwhere' .. "'" .. '.. "\r")<CR>'
+	nnoremap <expr> ,<Space> $':call term_sendkeys({octbfnr},' .. "'printf(" .. '"\033c");dbstack' .. "'" .. '.. "\r")<CR>'
+  nnoremap <C-PageUp> :Up<CR>
+  nnoremap <C-PageDown> :Down<CR>
+enddef
+
+def Exit()
+  sign_unplace('TermDebug')
+  sign_undefine('debugPC')
+  sign_undefine(brk_sgns->map("'debugBreakpoint' .. v:val"))
 enddef
 
 ###################################################################################
 # Main function #
-# This is a big function break it down later.
 def StartOctDb(bang: bool, ...octfile: list<string>)
 	InitVars()
 	if !executable(oct_bin)
@@ -191,10 +218,17 @@ def StartOctDb(bang: bool, ...octfile: list<string>)
   # Assume current window is the source code window
   srcwin = win_getid()
 
-	#################################
-	#### Create Output PTY ####
-	outbfnr = term_start('NONE', {term_name: "Octave Output", vertical: vvertical, callback: 'OutCB'})
-	var outpty = job_info(term_getjob(outbfnr))['tty_out']
+	##################################
+	#### Create Communication PTY ####
+	commbfnr = term_start('NONE', {term_name: "Octave Communication", vertical: vvertical, callback: 'CommCB'})
+	exe ":set nobl"
+	var commpty = job_info(term_getjob(commbfnr))['tty_out']
+	comm_win = win_getid()
+	##############################
+	#### Create Output Buffer ####
+	outbfnr = bufadd("Octave Output")
+	bufload(outbfnr)
+	exe $'new +set\ nobl|setl\ number&|setl\ fcs=eob:\\\\x20 {bufname(outbfnr)}|set bt=nowrite'
 	out_win = win_getid()
   if vvertical
     # Assuming the source code window will get a signcolumn, use two more
@@ -205,32 +239,22 @@ def StartOctDb(bang: bool, ...octfile: list<string>)
       wincmd H
     endif
   endif
-	#################################
-
-	#################################
+	###############################
 	#### Creat Octave Terminal ####
-	octbfnr = term_start(oct_bin, {term_name: "Octave", term_finish: 'close', err_io: 'file', err_name: outpty})
+	octbfnr = term_start(oct_bin, {term_name: "Octave", term_finish: 'close', err_io: 'file', err_name: commpty})
 	oct_win = win_getid()
-	term_sendkeys(octbfnr, $"PAGER('cat > {outpty}'); page_output_immediately(1);page_screen_output(1)\r")
-	#################################
-
+	exe ":set nobl"
+	term_sendkeys(octbfnr, $"PAGER('cat > {commpty}'); page_output_immediately(1);page_screen_output(1)\r")
+	#######################################
 	#### Sign For Program Counter Line ####
   sign_define('debugPC', {linehl: 'debugPC'})
   # Install debugger commands in the text window.
   win_gotoid(srcwin)
+	#######################################
   InstallCommands()
 	Mapping()
 
 enddef
-
-
-#g:octbufnr = term_start('octave', {out_cb: 'SlyCB'})
-#term_sendkeys(g:octbufnr, "1+1\<CR>")
-#g:octjob = term_getjob(g:octbufnr)
-#
-#g:shjob = job_start('bash', {callback: 'SlyCB', pty: 1})
-#g:shch = job_getchannel(g:shjob)
-#ch_sendraw(g:shjob, 'pwd')
 
 InitHighlight()
 InitAutocmd()
