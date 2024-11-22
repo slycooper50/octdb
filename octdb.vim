@@ -145,13 +145,14 @@ def HandleStack(frames: list<string>)
 	endfor
 	echom stack
 	for frame in stack
-		add(lines, frame['func'])
+		add(lines, frame['func'] .. repeat(' ', 4) .. frame['ln'])
 		if frame['active']
 			matchadd('curr_frame', frame['func'], 10, -1, {window: out_win})
 		else
 			matchadd('frame', frame['func'], 10, -1, {window: out_win})
 		endif
 	endfor
+	exe $":{outbfnr}bufdo %d"
 	setbufline(outbfnr, 1, lines)
 enddef
 
